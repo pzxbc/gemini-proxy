@@ -1,51 +1,53 @@
 // api/proxy.js
 export const config = {
-  runtime: 'edge',   // 强制开启边缘运行时，性能更强，处理流更稳
-  regions: ['iad1'], // 锁定美国东部，确保跳过香港节点的拦截
+  runtime: 'edge',
+  regions: ['iad1'], // 强制锁定美国华盛顿节点
 };
 
 export default async function (req) {
   const url = new URL(req.url);
   const targetHost = "generativeai.googleapis.com";
 
-  // 1. 构造精确的目标 URL
-  // 确保路径中的冒号 :streamGenerateContent 不会被二次编码
+  // 1. 提取路径和参数 (确保冒号不被转义)
   const actualPath = url.pathname.replace(/%3A/g, ':');
   const targetUrl = `https://${targetHost}${actualPath}${url.search}`;
 
-  console.log("Targeting Google:", targetUrl);
-
-  // 2. 构造纯净的 Headers
-  const newHeaders = new Headers(req.headers);
-  newHeaders.set("Host", targetHost);
-  newHeaders.delete("Referer");
-  newHeaders.delete("Origin");
+  // 2. 彻底手动构建 Headers，绝不克隆原始 req.headers
+  const cleanHeaders = new Headers();
   
-  // 确保 Content-Type 正确
-  if (req.method === "POST") {
-    newHeaders.set("Content-Type", "application/json");
+  // 提取 API Key (从 URL 参数或 x-goog-api-key 头部)
+  const apiKey = url.searchParams.get("key") || req.headers.get("x-goog-api-key");
+  if (apiKey) {
+    cleanHeaders.set("x-goog-api-key", apiKey);
   }
 
-  // 3. 直接透明转发请求流
+  // 这里的关键：不设置 Host 头部，fetch 会根据 targetUrl 自动填入正确的 Host
+  if (req.method === "POST") {
+    cleanHeaders.set("Content-Type", "application/json");
+  }
+
+  // 模拟一个标准的浏览器 User-Agent，增加通过率
+  cleanHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
   try {
+    // 3. 使用字符串 URL 发起请求
     const response = await fetch(targetUrl, {
       method: req.method,
-      headers: newHeaders,
+      headers: cleanHeaders,
       body: req.method === "POST" ? await req.text() : null,
       redirect: 'follow'
     });
 
-    // 4. 克隆响应头并添加跨域支持
-    const responseHeaders = new Headers(response.headers);
-    responseHeaders.set("Access-Control-Allow-Origin", "*");
-
+    // 4. 返回响应，添加跨域头以便调试
+    const resHeaders = new Headers(response.headers);
+    resHeaders.set("Access-Control-Allow-Origin", "*");
+    
     return new Response(response.body, {
       status: response.status,
-      statusText: response.statusText,
-      headers: responseHeaders,
+      headers: resHeaders,
     });
   } catch (e) {
-    return new Response(JSON.stringify({ error: e.message }), { 
+    return new Response(JSON.stringify({ error: "Proxy Error", message: e.message }), { 
       status: 500,
       headers: { "Content-Type": "application/json" }
     });
